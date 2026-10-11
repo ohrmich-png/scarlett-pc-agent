@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Scarlett's side of the PC bridge (runs on Scarlett's machine).
+
+Usage:
+    scarlett-pc ping                                  # round-trip check
+    scarlett-pc cmd '{"cmd":"shell","args":"whoami"}' # run a shell command
+    scarlett-pc shot [outfile.png]                    # screenshot -> saved file
+    scarlett-pc quit                                  # tell the agent to stop
+
+Commands are files in cmd/ of the private bridge repo; results come back as
+files in res/. Auth is handled by the gh-api binary (GitHub connector).
+"""
+import base64
+import json
+import os
+import subprocess
+import sys
+import time
+import uuid
+
+GH_API = os.environ.get("GH_API",
+                        os.path.expanduser("~/workspace/skills/github/bin/gh-api"))
+REPO = os.environ.get("PC_BRIDGE_REPO", "ohrmich-png/scarlett-pc-bridge")
+HERE = os.path.dirname(os.path.abspath(__file__))
+POLL_EVERY = 3
+
+
+class BridgeError(RuntimeError):
+    pass
+
+
+def gh(method, path, data=None):
+    cmd = [GH_API, method, path]
+    if data is not None:
+        cmd += ["--data", json.dumps(data)]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    out = (p.stdout or "").strip()
+    if out.startswith("HTTP "):
+        # gh-api prints errors as: HTTP 404: {"message":"Not Found",...}
+        code = out.split(" ", 2)[1].rstrip(":")
+        raise BridgeError(f"HTTP {code}: {out[:300]}")
+    if p.returncode != 0:
+        raise BridgeError(f"gh-api failed: {(p.stderr or out)[:300]}")
+    return json.loads(out) if out else None
+
+
+def put_cmd(payload):
+    cid = uuid.uuid4().hex[:12]
+    payload = {"id": cid, **payload}
+    raw = json.dumps(payload).encode()
+    gh("PUT", f"/repos/{REPO}/contents/cmd/{cid}.json",
+       {"message": f"cmd {cid}",
+        "content": base64.b64encode(raw).decode()})
+    return cid
+
+
+def wait_res(cid, timeout):
+    """Poll res/<cid>.json until it appears; delete it after reading."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            data = gh("GET", f"/repos/{REPO}/contents/res/{cid}.json?ref=main")
+        except BridgeError as e:
+            if "HTTP 404" in str(e):
+                time.sleep(POLL_EVERY)
+                continue
+            raise
+        if data and "content" in data:
+            try:
+                gh("DELETE", f"/repos/{REPO}/contents/res/{cid}.json",
+                   {"message": f"cleanup {cid}", "sha": data["sha"]})
+            except BridgeError:
+                pass
+            return json.loads(base64.b64decode(data["content"]).decode())
+        time.sleep(POLL_EVERY)
+    return None
+
+
+def timed_out():
+    return {"ok": False, "error": "timeout waiting for the PC agent "
+                                 "(is it running on Or's PC?)"}
+
+
+def cmd_ping():
+    cid = put_cmd({"cmd": "ping"})
+    print(json.dumps(wait_res(cid, 30) or timed_out(), indent=2))
+
+
+def cmd_shell(payload_json):
+    try:
+        payload = json.loads(payload_json)
+    except Exception as e:
+        sys.exit(f"bad JSON: {e}")
+    if not isinstance(payload, dict) or "cmd" not in payload:
+        sys.exit('JSON needs a "cmd" key, e.g. {"cmd":"shell","args":"whoami"}')
+    cid = put_cmd(payload)
+    print(f"sent {cid}, waiting for result...", file=sys.stderr)
+    print(json.dumps(wait_res(cid, 90) or timed_out(), indent=2))
+
+
+def cmd_shot(out=None):
+    cid = put_cmd({"cmd": "screenshot"})
+    print(f"screenshot {cid} requested, waiting...", file=sys.stderr)
+    res = wait_res(cid, 120)
+    if not res or not res.get("ok"):
+        print(json.dumps(res or timed_out(), indent=2))
+        return
+    fname = res.get("file")
+    data = gh("GET", f"/repos/{REPO}/contents/res/{fname}?ref=main")
+    png = base64.b64decode(data["content"])
+    out = out or os.path.join(HERE, "shots", f"shot-{int(time.time())}.png")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "wb") as f:
+        f.write(png)
+    try:
+        gh("DELETE", f"/repos/{REPO}/contents/res/{fname}",
+           {"message": f"cleanup {fname}", "sha": data["sha"]})
+    except BridgeError:
+        pass
+    print(out)
+
+
+def cmd_quit():
+    cid = put_cmd({"cmd": "quit"})
+    print(json.dumps(wait_res(cid, 30) or
+                     {"ok": False, "error": "no reply (agent may already be stopped)"},
+                     indent=2))
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit("usage: scarlett-pc ping | cmd '<json>' | shot [outfile] | quit")
+    action = sys.argv[1]
+    if action == "ping":
+        cmd_ping()
+    elif action == "cmd":
+        if len(sys.argv) < 3:
+            sys.exit('usage: scarlett-pc cmd \'{"cmd":"shell","args":"whoami"}\'')
+        cmd_shell(sys.argv[2])
+    elif action == "shot":
+        cmd_shot(sys.argv[3] if len(sys.argv) > 3 else None)
+    elif action == "quit":
+        cmd_quit()
+    else:
+        sys.exit(f"unknown action: {action}")
+
+
+if __name__ == "__main__":
+    main()

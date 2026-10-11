@@ -161,6 +161,16 @@ def main():
     cfg = load_config()
     log("Scarlett PC agent started.")
     log(f"Bridge repo: {cfg['BRIDGE_REPO']} (private)")
+    # Loud startup check: GitHub returns 404 for a private repo the token
+    # cannot see, which list_cmd() would otherwise mistake for "no commands".
+    repo = api(cfg, "GET", f"/repos/{cfg['BRIDGE_REPO']}")
+    if repo is None:
+        log("ERROR: cannot see the bridge repo with this token.")
+        log("The token needs: Only select repositories -> "
+            f"{cfg['BRIDGE_REPO'].split('/')[-1]}, Contents -> Read and write.")
+        log("Fix it at https://github.com/settings/tokens then restart me.")
+        sys.exit(1)
+    log("Bridge repo reachable. Token is good.")
     log("Checking for commands every 5s. Ctrl+C to stop.")
     log("Everything I run is printed in this window — nothing is hidden.")
     if not HAVE_MSS:

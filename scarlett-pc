@@ -2,13 +2,16 @@
 """Scarlett's side of the PC bridge (runs on Scarlett's machine).
 
 Usage:
-    scarlett-pc ping                                  # round-trip check
-    scarlett-pc cmd '{"cmd":"shell","args":"whoami"}' # run a shell command
-    scarlett-pc shot [outfile.png]                    # screenshot -> saved file
-    scarlett-pc quit                                  # tell the agent to stop
+    scarlett-pc ping [--machine NAME]                  # round-trip check
+    scarlett-pc cmd '{"cmd":"shell","args":"whoami"}' [--machine NAME]
+    scarlett-pc shot [outfile.png] [--machine NAME]    # screenshot -> saved file
+    scarlett-pc quit [--machine NAME]                  # tell the agent to stop
 
 Commands are files in cmd/ of the private bridge repo; results come back as
 files in res/. Auth is handled by the gh-api binary (GitHub connector).
+Each command is tagged for one machine (desktop/laptop/...); agents ignore
+commands tagged for another machine. Default machine: --machine flag,
+$PC_MACHINE env, ~/.scarlett-pc-machine file, else "desktop".
 """
 import base64
 import json
@@ -44,9 +47,39 @@ def gh(method, path, data=None):
     return json.loads(out) if out else None
 
 
-def put_cmd(payload):
+def default_machine():
+    """Which machine commands target unless overridden."""
+    env = os.environ.get("PC_MACHINE")
+    if env:
+        return env
+    try:
+        with open(os.path.expanduser("~/.scarlett-pc-machine")) as f:
+            name = f.read().strip()
+            if name:
+                return name
+    except OSError:
+        pass
+    return "desktop"
+
+
+def parse_machine_argv(argv):
+    """Pull -m/--machine NAME out of argv; return (machine, rest)."""
+    machine = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        if argv[i] in ("-m", "--machine") and i + 1 < len(argv):
+            machine = argv[i + 1]
+            i += 2
+        else:
+            rest.append(argv[i])
+            i += 1
+    return (machine or default_machine()), rest
+
+
+def put_cmd(payload, machine):
     cid = uuid.uuid4().hex[:12]
-    payload = {"id": cid, **payload}
+    payload = {"id": cid, "machine": machine, **payload}
     raw = json.dumps(payload).encode()
     gh("PUT", f"/repos/{REPO}/contents/cmd/{cid}.json",
        {"message": f"cmd {cid}",
@@ -81,25 +114,25 @@ def timed_out():
                                  "(is it running on Or's PC?)"}
 
 
-def cmd_ping():
-    cid = put_cmd({"cmd": "ping"})
+def cmd_ping(machine):
+    cid = put_cmd({"cmd": "ping"}, machine)
     print(json.dumps(wait_res(cid, 30) or timed_out(), indent=2))
 
 
-def cmd_shell(payload_json):
+def cmd_shell(payload_json, machine):
     try:
         payload = json.loads(payload_json)
     except Exception as e:
         sys.exit(f"bad JSON: {e}")
     if not isinstance(payload, dict) or "cmd" not in payload:
         sys.exit('JSON needs a "cmd" key, e.g. {"cmd":"shell","args":"whoami"}')
-    cid = put_cmd(payload)
+    cid = put_cmd(payload, machine)
     print(f"sent {cid}, waiting for result...", file=sys.stderr)
     print(json.dumps(wait_res(cid, 90) or timed_out(), indent=2))
 
 
-def cmd_shot(out=None):
-    cid = put_cmd({"cmd": "screenshot"})
+def cmd_shot(machine, out=None):
+    cid = put_cmd({"cmd": "screenshot"}, machine)
     print(f"screenshot {cid} requested, waiting...", file=sys.stderr)
     res = wait_res(cid, 120)
     if not res or not res.get("ok"):
@@ -120,27 +153,29 @@ def cmd_shot(out=None):
     print(out)
 
 
-def cmd_quit():
-    cid = put_cmd({"cmd": "quit"})
+def cmd_quit(machine):
+    cid = put_cmd({"cmd": "quit"}, machine)
     print(json.dumps(wait_res(cid, 30) or
                      {"ok": False, "error": "no reply (agent may already be stopped)"},
                      indent=2))
 
 
 def main():
-    if len(sys.argv) < 2:
-        sys.exit("usage: scarlett-pc ping | cmd '<json>' | shot [outfile] | quit")
-    action = sys.argv[1]
+    machine, argv = parse_machine_argv(sys.argv[1:])
+    if len(argv) < 1:
+        sys.exit("usage: scarlett-pc ping | cmd '<json>' | shot [outfile] | quit "
+                 "[-m MACHINE]")
+    action = argv[0]
     if action == "ping":
-        cmd_ping()
+        cmd_ping(machine)
     elif action == "cmd":
-        if len(sys.argv) < 3:
+        if len(argv) < 2:
             sys.exit('usage: scarlett-pc cmd \'{"cmd":"shell","args":"whoami"}\'')
-        cmd_shell(sys.argv[2])
+        cmd_shell(argv[1], machine)
     elif action == "shot":
-        cmd_shot(sys.argv[3] if len(sys.argv) > 3 else None)
+        cmd_shot(machine, argv[1] if len(argv) > 1 else None)
     elif action == "quit":
-        cmd_quit()
+        cmd_quit(machine)
     else:
         sys.exit(f"unknown action: {action}")
 

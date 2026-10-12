@@ -61,6 +61,21 @@ Any one of these stops it dead:
 The agent does **not** start with Windows and installs nothing — when the
 window is closed, it's fully off.
 
+## Two computers at once
+
+Give each machine its own name in `agent.env`:
+
+```
+MACHINE=desktop   # on your PC
+MACHINE=laptop    # on your laptop
+```
+
+Both agents can stay live on the same bridge — each one only runs commands
+tagged for its own name and quietly ignores the rest. (Without this, every
+command would run twice — once per machine.) Tell Scarlett which machine
+you're on and she'll address her commands to it; a command sent while its
+machine is offline simply waits in the bridge until that agent starts.
+
 ## What Scarlett can do with it
 
 | Command | What it does |

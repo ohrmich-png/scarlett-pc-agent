@@ -52,6 +52,7 @@ def load_config():
         "GITHUB_TOKEN": os.environ.get("GITHUB_TOKEN", ""),
         "BRIDGE_REPO": os.environ.get(
             "BRIDGE_REPO", "ohrmich-png/scarlett-pc-bridge"),
+        "MACHINE": os.environ.get("MACHINE", "desktop"),
     }
     env_path = os.path.join(here, "agent.env")
     if os.path.exists(env_path):
@@ -161,6 +162,8 @@ def main():
     cfg = load_config()
     log("Scarlett PC agent started.")
     log(f"Bridge repo: {cfg['BRIDGE_REPO']} (private)")
+    log(f"Machine name: {cfg['MACHINE']} "
+        "(commands tagged for another machine are ignored)")
     # Loud startup check: GitHub returns 404 for a private repo the token
     # cannot see, which list_cmd() would otherwise mistake for "no commands".
     repo = api(cfg, "GET", f"/repos/{cfg['BRIDGE_REPO']}")
@@ -190,6 +193,10 @@ def main():
                     cmd = json.loads(raw.decode("utf-8"))
                 except Exception as e:
                     log(f"  bad command file {name}: {e}")
+                    continue
+                target = cmd.get("machine")
+                if target and target != cfg["MACHINE"]:
+                    log(f"  skipping {name} (tagged for '{target}')")
                     continue
                 # claim it first so a restart can never run it twice
                 try:

@@ -54,12 +54,29 @@ want her connected. Tell her it's running and she'll take it from there.
 
 Any one of these stops it dead:
 - Press **Ctrl+C** in its window, or just **close the window**.
+- Right-click its tray icon (if in tray mode) → **Quit**.
 - Ask Scarlett to send the `quit` command.
 - Revoke the token at https://github.com/settings/tokens (instant remote kill).
 - Delete the `scarlett-pc-bridge` repo (nuclear option).
 
 The agent does **not** start with Windows and installs nothing — when the
 window is closed, it's fully off.
+
+## Tray mode (no console window)
+
+Prefer the agent tucked next to the clock instead of on the taskbar?
+
+1. `pip install pystray pillow`
+2. Make sure `scarlett.ico` sits next to `pc-agent.py` (it's in this repo).
+3. Launch with `pythonw.exe` instead of `python.exe`:
+   ```
+   pythonw pc-agent.py
+   ```
+   No console, no taskbar button — just a Scarlett tray icon with a
+   right-click → Quit menu. Point a shortcut (and the Startup-folder copy)
+   at `pythonw.exe` to make it the default.
+4. To force the classic console window even with pystray installed, set
+   `SCARLETT_NO_TRAY=1` before launching.
 
 ## Two computers at once
 

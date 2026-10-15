@@ -16,6 +16,11 @@ KILL SWITCH (any of these stops it immediately):
 
 Requires: Python 3 (tick "Add python.exe to PATH" during install), then:
     pip install requests mss
+
+Optional tray mode (no console window, lives next to the clock):
+    pip install pystray pillow
+then launch with pythonw.exe instead of python.exe.
+Set SCARLETT_NO_TRAY=1 to force console mode.
 """
 
 import base64
@@ -35,6 +40,16 @@ try:
 except ImportError:
     HAVE_MSS = False
 
+try:
+    import pystray
+    from PIL import Image
+    HAVE_TRAY = True
+except ImportError:
+    HAVE_TRAY = False
+
+_tray_icon = None
+_log_file = None
+
 API = "https://api.github.com"
 POLL_SECONDS = 5
 SHELL_TIMEOUT = 120
@@ -43,7 +58,30 @@ MAX_OUT = 3000  # command output is truncated to this many chars
 
 def log(msg):
     ts = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    line = f"[{ts}] {msg}"
+    try:
+        if sys.stdout is None:
+            raise AttributeError("no console")
+        print(line, flush=True)
+    except (AttributeError, OSError, ValueError):
+        # pythonw.exe has no console — log to a file instead
+        global _log_file
+        if _log_file is None:
+            here = os.path.dirname(os.path.abspath(__file__))
+            _log_file = open(os.path.join(here, "agent.log"), "a",
+                             encoding="utf-8")
+        _log_file.write(line + "\n")
+        _log_file.flush()
+
+
+def shutdown():
+    """Stop the agent from any mode (console or tray)."""
+    if _tray_icon is not None:
+        try:
+            _tray_icon.stop()
+        except Exception:
+            pass
+    os._exit(0)
 
 
 def load_config():
@@ -150,7 +188,7 @@ def handle(cfg, cmd):
         put_file(cfg, f"res/{cid}.json",
                  json.dumps(result).encode(), f"result {cid}")
         log("quit received — shutting down. Bye!")
-        sys.exit(0)
+        shutdown()
     else:
         result = {"id": cid, "ok": False, "error": f"unknown command: {name}"}
 
@@ -158,26 +196,9 @@ def handle(cfg, cmd):
     log(f"  -> result written (ok={result.get('ok')})")
 
 
-def main():
-    cfg = load_config()
-    log("Scarlett PC agent started.")
-    log(f"Bridge repo: {cfg['BRIDGE_REPO']} (private)")
-    log(f"Machine name: {cfg['MACHINE']} "
-        "(commands tagged for another machine are ignored)")
-    # Loud startup check: GitHub returns 404 for a private repo the token
-    # cannot see, which list_cmd() would otherwise mistake for "no commands".
-    repo = api(cfg, "GET", f"/repos/{cfg['BRIDGE_REPO']}")
-    if repo is None:
-        log("ERROR: cannot see the bridge repo with this token.")
-        log("The token needs: Only select repositories -> "
-            f"{cfg['BRIDGE_REPO'].split('/')[-1]}, Contents -> Read and write.")
-        log("Fix it at https://github.com/settings/tokens then restart me.")
-        sys.exit(1)
-    log("Bridge repo reachable. Token is good.")
-    log("Checking for commands every 5s. Ctrl+C to stop.")
-    log("Everything I run is printed in this window — nothing is hidden.")
-    if not HAVE_MSS:
-        log("WARNING: mss not installed — screenshots will fail. Run: pip install mss")
+def poll_forever(cfg):
+    """The main polling loop — runs in the main thread (console mode) or a
+    background thread (tray mode)."""
     seen = set()
     while True:
         try:
@@ -212,6 +233,64 @@ def main():
         except Exception as e:
             log(f"poll error: {e} (retrying)")
         time.sleep(POLL_SECONDS)
+
+
+def run_tray(cfg):
+    """System-tray mode: polling runs in a background thread, the main thread
+    owns the notification-area icon (with a Quit menu). No console window."""
+    import threading
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    def load_icon():
+        ico = os.path.join(here, "scarlett.ico")
+        try:
+            if os.path.exists(ico):
+                return Image.open(ico)
+        except Exception as e:
+            log(f"could not load scarlett.ico: {e}")
+        return Image.new("RGB", (64, 64), (200, 30, 30))  # fallback red square
+
+    t = threading.Thread(target=poll_forever, args=(cfg,), daemon=True)
+    t.start()
+    global _tray_icon
+    _tray_icon = pystray.Icon(
+        "scarlett-agent",
+        load_icon(),
+        f"Scarlett Agent ({cfg['MACHINE']})",
+        menu=pystray.Menu(
+            pystray.MenuItem("Quit", lambda icon, item: shutdown()),
+        ),
+    )
+    log("Tray mode: find me next to the clock. Right-click > Quit to stop.")
+    _tray_icon.run()
+
+
+def main():
+    cfg = load_config()
+    log("Scarlett PC agent started.")
+    log(f"Bridge repo: {cfg['BRIDGE_REPO']} (private)")
+    log(f"Machine name: {cfg['MACHINE']} "
+        "(commands tagged for another machine are ignored)")
+    # Loud startup check: GitHub returns 404 for a private repo the token
+    # cannot see, which list_cmd() would otherwise mistake for "no commands".
+    repo = api(cfg, "GET", f"/repos/{cfg['BRIDGE_REPO']}")
+    if repo is None:
+        log("ERROR: cannot see the bridge repo with this token.")
+        log("The token needs: Only select repositories -> "
+            f"{cfg['BRIDGE_REPO'].split('/')[-1]}, Contents -> Read and write.")
+        log("Fix it at https://github.com/settings/tokens then restart me.")
+        sys.exit(1)
+    log("Bridge repo reachable. Token is good.")
+    log("Checking for commands every 5s. Ctrl+C to stop.")
+    log("Everything I run is printed in this window — nothing is hidden.")
+    if not HAVE_MSS:
+        log("WARNING: mss not installed — screenshots will fail. Run: pip install mss")
+    if HAVE_TRAY and os.environ.get("SCARLETT_NO_TRAY") != "1":
+        run_tray(cfg)
+    else:
+        if not HAVE_TRAY:
+            log("Tip: pip install pystray pillow for system-tray mode.")
+        poll_forever(cfg)
 
 
 if __name__ == "__main__":

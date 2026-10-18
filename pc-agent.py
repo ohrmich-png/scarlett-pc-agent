@@ -143,10 +143,19 @@ def delete_file(cfg, path, sha):
         {"message": f"done {path}", "sha": sha})
 
 
+def _hidden_startupinfo():
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        return si
+    return None
+
+
 def do_shell(args):
     try:
         p = subprocess.run(args, shell=True, capture_output=True, text=True,
-                           timeout=SHELL_TIMEOUT, errors="replace")
+                           timeout=SHELL_TIMEOUT, errors="replace",
+                           startupinfo=_hidden_startupinfo())
         return {"ok": True, "exit": p.returncode,
                 "stdout": p.stdout[-MAX_OUT:], "stderr": p.stderr[-MAX_OUT:]}
     except subprocess.TimeoutExpired:
@@ -207,6 +216,9 @@ def poll_forever(cfg):
                 if not name.endswith(".json") or name in seen:
                     continue
                 seen.add(name)
+                if len(seen) > 2000:
+                    seen.clear()
+
                 raw = get_file(cfg, f"cmd/{name}")
                 if raw is None:
                     continue
@@ -232,7 +244,31 @@ def poll_forever(cfg):
             raise
         except Exception as e:
             log(f"poll error: {e} (retrying)")
+        try:
+            _hb_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "heartbeat.txt")
+            with open(_hb_path, "w") as _hb:
+                _hb.write(str(time.time()))
+        except Exception:
+            pass
         time.sleep(POLL_SECONDS)
+
+
+def show_console():
+    """Open a PowerShell window tailing the agent log (tray left-click)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(here, "agent.log")
+    # touch the log so Get-Content has something to tail
+    try:
+        open(log_path, "a", encoding="utf-8").close()
+    except Exception:
+        pass
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-Command",
+         "$Host.UI.RawUI.WindowTitle='\u2665 Scarlett'; "
+         f"Get-Content '{log_path}' -Tail 40 -Wait"],
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+    )
 
 
 def run_tray(cfg):
@@ -258,6 +294,8 @@ def run_tray(cfg):
         load_icon(),
         f"Scarlett Agent ({cfg['MACHINE']})",
         menu=pystray.Menu(
+            pystray.MenuItem("Show console", lambda icon, item: show_console(),
+                             default=True),
             pystray.MenuItem("Quit", lambda icon, item: shutdown()),
         ),
     )
